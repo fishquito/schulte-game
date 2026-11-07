@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>记忆矩阵 · 专注力训练馆</title>
+<meta name="theme-color" content="#070a12">
+<link rel="icon" type="image/svg+xml" href="../shared/favicon.svg">
+<link rel="stylesheet" href="../shared/core.css">
+<style>
+  .stage{width:min(100%,54vh);margin:0 auto;aspect-ratio:1/1}
+  .stage svg{width:100%;height:100%;display:block;touch-action:manipulation;user-select:none;-webkit-user-select:none}
+
+  .cell > *{fill:var(--cell);stroke:var(--stroke);stroke-width:1.5;transition:fill .12s,stroke .12s}
+  .cell{cursor:default}
+  .stage.input .cell{cursor:pointer}
+  .stage.input .cell:hover > *{fill:var(--cellHover);stroke:var(--strokeHover)}
+
+  .cell.lit > *{fill:var(--acc2);stroke:#b9ffe4}
+  .cell.lit{filter:drop-shadow(0 0 10px rgba(124,245,196,.55))}
+  .cell.done > *{fill:#1c2c48;stroke:#3a5a90}
+  .cell.wrong > *{fill:#3a1220;stroke:var(--bad)}
+  .cell.wrong{animation:shake .24s ease-in-out;transform-box:fill-box;transform-origin:center}
+  @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-4px)}75%{transform:translateX(4px)}}
+
+  #phase{color:var(--acc2)}
+  #phase.wait{color:var(--dim)}
+  .seg.sm button{padding:5px 9px;font-size:11.5px}
+</style>
+</head>
+<body class="play">
+<div class="app">
+  <div class="hud">
+    <div class="stat"><b id="len">3</b><small>本次长度</small></div>
+    <div class="stat"><b id="done">0</b><small>已通过</small></div>
+    <div class="stat"><b id="time">0.0</b><small>秒</small></div>
+    <div class="stat"><b id="phase" class="wait">准备</b><small>状态</small></div>
+  </div>
+
+  <div class="prog"><i id="bar"></i></div>
+
+  <div class="stage" id="stage">
+    <svg id="board" viewBox="0 0 600 600" aria-label="记忆矩阵棋盘"></svg>
+    <div class="veil"></div>
+  </div>
+
+  <div class="subrow">
+    <span id="bestLine">最佳 —</span>
+    <div class="acts">
+      <div class="seg sm" id="sizeSeg">
+        <button data-v="3" class="on">3×3</button>
+        <button data-v="4">4×4</button>
+        <button data-v="5">5×5</button>
+      </div>
+      <button class="toggle" id="again">重开</button>
+    </div>
+  </div>
+</div>
+
+<script src="../shared/core.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  const { $, esc, fmt, tagOf, shortDate } = Core.util;
+  const GAME = 'memory';
+  const { grade } = Core;
+
+  const START_LEN = 3;          // 从 3 个格子开始
+  const LIT = 430;              // 每格亮多久
+  const GAP = 170;              // 两格之间的间隔
+
+  // S 级基准：成功复现到多长
+  const PAR = { 3: 7, 4: 8, 5: 9 };
+  const scoreOf = (len, size) => Math.max(0, Math.min(150, Math.round(len / PAR[size] * 100)));
+
+  const board = $('#board'), stage = $('#stage');
+  const elLen = $('#len'), elDone = $('#done'), elTime = $('#time'), elPhase = $('#phase');
+  const elBar = $('#bar'), elBest = $('#bestLine');
+
+  const state = {
+    size: 3, len: START_LEN, done: 0,
+    seq: [], qi: 0, phase: 'idle',
+    t0: 0, timer: 0, token: 0, running: false
+  };
+
+  const boardKey = () => 'grid|' + state.size + '|f';
+  const cells = () => board.querySelectorAll('.cell');
+
+  function bestBy(arr){
+    if(!arr.length) return null;
+    return arr.reduce((a, r) => (r.s > a.s || (r.s === a.s && r.t < a.t) ? r : a));
+  }
+
+  /* ---------------- 棋盘 ---------------- */
+  function buildGrid(){
+    const n = state.size;
+    const pad = 22, gap = n <= 3 ? 15 : (n === 4 ? 12 : 9);
+    const s = (600 - pad * 2 - gap * (n - 1)) / n;
+    const rx = Math.min(20, s * 0.2);
+    const parts = [];
+    for(let r = 0; r < n; r++) for(let c = 0; c < n; c++){
+      const x = pad + c * (s + gap), y = pad + r * (s + gap);
+      const i = r * n + c;
+      parts.push(
+        `<g class="cell" data-i="${i}">` +
+        `<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${s.toFixed(2)}" height="${s.toFixed(2)}" ` +
+        `rx="${rx.toFixed(2)}" ry="${rx.toFixed(2)}"/></g>`
+      );
+    }
+    board.innerHTML = parts.join('');
+  }
+
+  function clearMarks(){
+    cells().forEach(g => g.classList.remove('lit', 'done', 'wrong'));
+  }
+
+  function randomSeq(n, len){
+    const all = Array.from({ length: n * n }, (_, i) => i);
+    for(let i = all.length - 1; i > 0; i--){
+      const j = Math.floor(Math.random() * (i + 1));
+      const t = all[i]; all[i] = all[j]; all[j] = t;
+    }
+    return all.slice(0, len);
+  }
+
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+
+  /* ---------------- 回合 ---------------- */
+  function setPhase(text, isWait){
+    elPhase.textContent = text;
+    elPhase.classList.toggle('wait', !!isWait);
+  }
+
+  function paintHud(){
+    elLen.textContent = state.len;
+    elDone.textContent = state.done;
+  }
+
+  function refreshBestLine(){
+    const r = bestBy(Core.runs.of(GAME, boardKey()));
+    elBest.textContent = r ? `最佳 ${r.s} 格 · ${scoreOf(r.s, r.size)} 分` : '最佳 —';
+  }
+
+  async function playRound(){
+    const tok = state.token;
+    clearMarks();
+    state.seq = randomSeq(state.size, state.len);
+    state.qi = 0;
+    state.phase = 'show';
+    stage.classList.remove('input');
+    paintHud();
+    setPhase('记住顺序');
+
+    for(const idx of state.seq){
+      if(tok !== state.token) return;
+      const g = board.querySelector(`.cell[data-i="${idx}"]`);
+      if(g) g.classList.add('lit');
+      Core.sfx.blip(520 + idx * 6, 0.05, 'sine');
+      await wait(LIT);
+      if(tok !== state.token) return;
+      if(g) g.classList.remove('lit');
+      await wait(GAP);
+    }
+    if(tok !== state.token) return;
+
+    state.phase = 'input';
+    stage.classList.add('input');
+    setPhase('轮到你了');
+    elBar.style.width = '100%';
+  }
+
+  function pick(idx){
+    if(state.phase !== 'input') return;
+    const g = board.querySelector(`.cell[data-i="${idx}"]`);
+
+    if(idx === state.seq[state.qi]){
+      if(g){ g.classList.add('done'); }
+      Core.sfx.blip(680, 0.05, 'triangle');
+      state.qi++;
+
+      if(state.qi >= state.seq.length){
+        state.phase = 'idle';
+        stage.classList.remove('input');
+        state.done = state.seq.length;
+        paintHud();
+
+        if(state.len >= state.size * state.size){ finish(true); return; }
+
+        state.len++;
+        paintHud();
+        setPhase('✓ 通过', false);
+        setTimeout(() => { if(state.running) playRound(); }, 620);
+      }
+      return;
+    }
+
+    // 点错
+    if(g){ g.classList.add('wrong'); }
+    Core.sfx.blip(150, 0.14, 'square');
+    state.phase = 'idle';
+    stage.classList.remove('input');
+    setPhase('✗ 错了', false);
+    setTimeout(() => { if(state.running) finish(false); }, 420);
+  }
+
+  board.addEventListener('pointerdown', e => {
+    const g = e.target.closest ? e.target.closest('.cell') : null;
+    if(!g) return;
+    pick(parseInt(g.dataset.i, 10));
+  });
+
+  /* ---------------- 一局 ---------------- */
+  function newRound(){
+    stop();
+    state.len = START_LEN;
+    state.done = 0;
+    state.seq = [];
+    state.qi = 0;
+    state.phase = 'idle';
+    buildGrid();
+
+    paintHud();
+    setPhase('准备', true);
+    elTime.textContent = '0.0';
+    elBar.style.width = '0%';
+    refreshBestLine();
+
+    const rec = bestBy(Core.runs.of(GAME, boardKey()));
+    const par = PAR[state.size];
+    Core.ui.overlay(
+      `<div class="panel-in">
+         <h2>记忆矩阵 · ${state.size}×${state.size}</h2>
+         <div class="big">${rec ? rec.s + '<small>格</small><em>最佳</em>' : START_LEN + '<small>格</small><em>起步</em>'}</div>
+         <div class="meta">格子依次亮起，按<b>同样的顺序</b>点回去<br>点对一次长度 +1，点错就结束</div>
+         <button class="btn" id="startBtn">开始游戏</button>
+         <div class="tiny">S 基准 连续 ${par} 格 · 起点 ${START_LEN} 格</div>
+       </div>`);
+    $('#startBtn').addEventListener('click', beginRound);
+  }
+
+  function beginRound(){
+    stop();
+    const tok = ++state.token;
+    state.running = true;
+    state.len = START_LEN;
+    state.done = 0;
+    paintHud();
+    elTime.textContent = '0.0';
+    elBar.style.width = '0%';
+    clearMarks();
+
+    Core.ui.countdown(() => {
+      if(tok !== state.token) return;
+      state.t0 = performance.now();
+      state.timer = setInterval(paintTime, 200);
+      playRound();
+    });
+  }
+
+  function paintTime(){
+    const t = (performance.now() - state.t0) / 1000;
+    elTime.textContent = t.toFixed(1);
+    // 进度条：只表示「本轮长度 / 最大长度」
+    elBar.style.width = Math.min(100, (state.len / (state.size * state.size)) * 100).toFixed(1) + '%';
+  }
+
+  function stop(){
+    state.running = false;
+    clearInterval(state.timer);
+    stage.classList.remove('input');
+  }
+
+  function finish(win){
+    stop();
+    clearInterval(state.timer);
+
+    const size = state.size;
+    const secs = state.t0 ? (performance.now() - state.t0) / 1000 : 0;
+    const len = state.done;
+    const score = scoreOf(len, size);
+    const g = grade(score);
+    const prev = bestBy(Core.runs.of(GAME, boardKey()));
+
+    const run = {
+      id: Core.profile ? Core.profile.id : '',
+      name: Core.profile ? Core.profile.name : '',
+      t: parseFloat(Math.max(1.5, secs).toFixed(2)),
+      s: len,
+      d: new Date().toISOString(),
+      mode: 'grid', size: size, rev: false
+    };
+    const improved = !prev || run.s > prev.s || (run.s === prev.s && run.t < prev.t);
+    Core.runs.add(GAME, boardKey(), run);
+
+    Core.sfx.fanfare(g);
+    const who = Core.profile
+      ? esc(Core.profile.name) + (Core.profile.id ? `<em style="color:#5d6a88;font-style:normal;font-size:11px">${tagOf(Core.profile.id)}</em>` : '')
+      : '';
+
+    Core.ui.overlay(
+      `<div class="panel-in">
+         <h2>${win ? '满分' : '结束'} · ${size}×${size}</h2>
+         <div class="scoreRow">
+           <div class="badge g-${g}">${g}</div>
+           <div class="big">${len}<small>格</small></div>
+         </div>
+         <div class="meta"><span class="nw">评分 <b class="g-${g}">${score}</b> 分</span> · <span class="nw">用时 <b>${secs.toFixed(1)}</b> 秒</span></div>
+         <div class="meta">${improved ? '<span class="rec">★ 个人最好</span>' : '未破个人最好 ' + (prev ? prev.s + ' 格' : '—')}</div>
+         ${who ? `<div class="meta" style="font-size:12px">${who}</div>` : ''}
+         <div class="tiny" id="postMsg" style="min-height:15px"></div>
+         <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+           <button class="btn" id="againBtn">再来一局</button>
+           <button class="btn ghost" id="lbBtn">看排行榜</button>
+         </div>
+         <div class="tiny">S 基准 连续 ${PAR[size]} 格</div>
+       </div>`);
+
+    const msg = $('#postMsg');
+    if(!Core.online){
+      msg.textContent = improved ? '本机最好成绩已刷新' : '未破个人最好';
+    }else if(Core.profile && Core.profile.id){
+      pushRun(run);
+    }else{
+      msg.style.color = 'var(--dim)';
+      msg.textContent = '离线档案：连上服务器后可自动上榜';
+    }
+
+    $('#againBtn').addEventListener('click', newRound);
+    $('#lbBtn').addEventListener('click', openLB);
+    refreshBestLine();
+  }
+
+  async function pushRun(rec){
+    if(!Core.online) return;
+    const msg = $('#postMsg');
+    try{
+      const r = await Core.api.post(GAME, { mode:'grid', size:state.size, rev:false }, rec.id, rec.t, rec.s);
+      if(msg){
+        msg.style.color = 'var(--acc2)';
+        msg.innerHTML = r.improved
+          ? `已自动上榜 · 全球第 <b>${r.rank}</b> 名`
+          : '未破个人最好，榜单保持不变';
+      }
+    }catch(e){
+      if(msg){
+        msg.style.color = 'var(--bad)';
+        msg.textContent = e.message === 'invalid score' ? '成绩未通过服务端校验，未上榜' : '上榜失败：' + e.message;
+      }
+    }
+  }
+
+  /* ---------------- 排行榜 ---------------- */
+  function openLB(){
+    Core.lb.open({
+      game: GAME,
+      title: '排行榜',
+      groups: [
+        { key:'size', value: state.size, items:[
+          {v:3, label:'3×3'}, {v:4, label:'4×4'}, {v:5, label:'5×5'} ] }
+      ],
+      board: v => ({ mode:'grid', size: Number(v.size), rev:false }),
+      subtitle: v => `${v.size}×${v.size} · 连续记住越多越好`,
+      best: arr => arr.reduce((a, r) => (r.s > a.s || (r.s === a.s && r.t < a.t) ? r : a)),
+      localRow: (r, best) => `
+        <span class="rk">${best ? '★' : ''}</span>
+        <span class="t">${r.s}<small>格</small></span>
+        <span class="s g-${grade(scoreOf(r.s, r.size))}">${scoreOf(r.s, r.size)}</span>
+        <span class="d">${shortDate(r.d)}</span>`,
+      globalRow: (r, i, me) => `
+        <span class="rk rk${i+1}">${i+1}</span>
+        <span class="nm"><b>${esc(r.name || '匿名')}</b><em>${tagOf(r.id)}</em>${me ? ' <small style="color:var(--acc2);font-weight:600">我</small>' : ''}</span>
+        <span class="t">${r.s}<small>格</small></span>
+        <span class="s g-${grade(scoreOf(r.s, state.size))}">${scoreOf(r.s, state.size)}</span>`
+    });
+  }
+
+  /* ---------------- 配置 ---------------- */
+  $('#sizeSeg').addEventListener('click', function(e){
+    const b = e.target.closest('button');
+    if(!b || b.classList.contains('on')) return;
+    Array.from(this.children).forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    state.size = parseInt(b.dataset.v, 10);
+    newRound();
+  });
+
+  $('#again').addEventListener('click', newRound);
+
+  window.addEventListener('keydown', function(e){
+    if(Core.gate.isOpen) return;
+    if($('#lb').classList.contains('show')) return;
+    if(e.code === 'Space' || e.code === 'Enter'){
+      if(state.phase === 'input') return;          // 输入阶段别误触
+      e.preventDefault();
+      const b = $('.veil').querySelector('button');
+      if(b) b.click();
+    }
+  });
+
+  /* ---------------- 启动 ---------------- */
+  (async function boot(){
+    Core.mountTopbar({ title:'记忆矩阵', sub:'SPATIAL', onLB: openLB });
+    const info = await Core.ready;
+
+    if(info.link.tried && !info.link.ok && info.link.error !== 'offline'){
+      newRound();
+      Core.gate.open(() => newRound());
+      Core.gate.msg(info.link.error === 'not found' ? '链接里的档案号不存在' : ('登录失败：' + info.link.error));
+      return;
+    }
+    newRound();
+    if(!Core.profile) Core.gate.open(() => newRound());
+  })();
+})();
+</script>
+</body>
+</html>

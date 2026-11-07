@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>舒尔特方格 · 专注力训练馆</title>
+<meta name="theme-color" content="#070a12">
+<link rel="icon" type="image/svg+xml" href="../shared/favicon.svg">
+<link rel="stylesheet" href="../shared/core.css">
+<style>
+  #target{color:var(--acc2)}
+  #errors{color:var(--bad)}
+  #score{transition:color .2s}
+
+  .boardWrap svg{width:100%;height:100%;display:block;touch-action:manipulation;user-select:none;-webkit-user-select:none}
+
+  .cell > *{fill:var(--cell);stroke:var(--stroke);stroke-width:1.5;transition:fill .18s,stroke .18s}
+  .cell{cursor:pointer}
+  .cell:hover > *{fill:var(--cellHover);stroke:var(--strokeHover)}
+  .cell text{fill:#dfe8fb;font-weight:650;pointer-events:none;font-family:inherit;font-variant-numeric:tabular-nums}
+  .cell.done{opacity:.26;pointer-events:none;transition:opacity .3s}
+  #board.fin .cell.done{opacity:.5}
+  #board.fin .cell.done > *{stroke:#2f3f63}
+  .cell.done > *{fill:#0a1220;stroke:#182135}
+  .cell.wrong > *{fill:#3a1220;stroke:var(--bad)}
+  .cell.wrong{animation:shake .24s ease-in-out;transform-box:fill-box;transform-origin:center}
+  @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-4px)}75%{transform:translateX(4px)}}
+
+  .orbit{fill:none;stroke:rgba(124,245,196,.32);stroke-width:1.5;stroke-dasharray:2 15;
+         transform-box:view-box;transform-origin:300px 300px;animation:spin 18s linear infinite;pointer-events:none}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .halo{fill:none;stroke:rgba(76,201,240,.5);stroke-width:1.5;pointer-events:none;animation:breathe 4.2s ease-in-out infinite}
+  @keyframes breathe{0%,100%{opacity:.18}50%{opacity:.75}}
+
+  .rip{fill:none;stroke:var(--acc2);stroke-width:2;transform-box:view-box;animation:rip .55s ease-out forwards;pointer-events:none}
+  @keyframes rip{from{opacity:.9;transform:scale(.25)}to{opacity:0;transform:scale(2.2)}}
+
+  .boardWrap{width:min(100%,56vh);margin:0 auto;aspect-ratio:1/1}
+  .controls{display:grid;grid-template-columns:1.4fr 1fr;gap:8px}
+</style>
+</head>
+<body class="play">
+<div class="app">
+  <div class="hud">
+    <div class="stat"><b id="time">0.00</b><small>秒</small></div>
+    <div class="stat"><b id="score">—</b><small>评分</small></div>
+    <div class="stat"><b id="target">1</b><small>下一个</small></div>
+    <div class="stat"><b id="errors">0</b><small>失误</small></div>
+  </div>
+
+  <div class="prog"><i id="bar"></i></div>
+
+  <div class="boardWrap stage">
+    <svg id="board" viewBox="0 0 600 600" aria-label="舒尔特方格棋盘"></svg>
+    <div class="veil"></div>
+  </div>
+
+  <div class="controls">
+    <div class="seg" id="shapeSeg">
+      <button data-v="square" class="on">方形</button>
+      <button data-v="radial">圆环</button>
+      <button data-v="star">星芒</button>
+    </div>
+    <div class="seg" id="sizeSeg">
+      <button data-v="4">4×4</button>
+      <button data-v="5" class="on">5×5</button>
+      <button data-v="6">6×6</button>
+    </div>
+  </div>
+  <div class="subrow">
+    <span id="bestLine">最佳 —</span>
+    <div class="acts">
+      <button class="toggle on" id="motion">动效</button>
+      <button class="toggle" id="rev">倒序</button>
+      <button class="toggle" id="again2">重开</button>
+    </div>
+  </div>
+</div>
+
+<script src="../shared/core.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  const { $, esc, fmt, tagOf, shortDate } = Core.util;
+
+  const GAME = 'schulte';
+
+  const board   = $('#board');
+  const overlay = $('.veil');
+  const elTime  = $('#time');
+  const elScore = $('#score');
+  const elTarget= $('#target');
+  const elErr   = $('#errors');
+  const elBar   = $('#bar');
+  const elBest  = $('#bestLine');
+
+  // 每形状每尺寸的环带格数（总和 = n²）
+  const RING_PRESETS = { 4:[1,5,10], 5:[1,8,16], 6:[1,8,12,15] };
+
+  // S 级基准线（秒）：5×5 方形要 15 秒以内才算 S，其余按格子数与形状难度换算
+  //   每格约 0.6s；4×4 略快、6×6 略慢；星芒 ×1.2、圆环（自转）×1.27
+  const PAR = {
+    square:{4: 9, 5:15, 6:23},
+    star:  {4:11, 5:18, 6:27},
+    radial:{4:12, 5:19, 6:29}
+  };
+  const SCORE_MAX = 150;        // 上限定在 150，头部玩家之间还有区分度
+  // 评级线整体下压：S 必须打满基准线，A/B/C 才不至于人人 D
+  const GRADE_CUT = [['S',100],['A',80],['B',65],['C',50],['D',0]];
+
+  // 圆环各环角速度（deg/s），正负代表方向
+  const ROT_SPEED = [0, 6, -4.2, 3.1, -2.3, 1.7];
+
+  const state = {
+    shape:'square', n:5, reverse:false, motion:true,
+    total:25, queue:[], qi:0, errors:0, penalty:0,
+    started:false, finished:false, t0:0, raf:0, token:0,
+    lastRun:null
+  };
+
+  const boardKey = () => state.shape + '|' + state.n + '|' + (state.reverse ? 'r' : 'f');
+
+  let animT = 0, animRAF = 0, rings = [];
+
+  /* ---------------- 评分 ---------------- */
+  const parOf   = () => PAR[state.shape][state.n];
+  const scoreOf = t => Math.max(0, Math.min(SCORE_MAX, Math.round(parOf() / t * 100)));
+  const gradeOf = Core.grade;
+  function gradeLines(){
+    const p = parOf();
+    return GRADE_CUT.filter(g => g[1] > 0 && g[0] !== 'S').map(g => `${g[0]}≤${(100*p/g[1]).toFixed(1)}s`).join(' · ');
+  }
+
+  /* ---------------- 布局：方形 ---------------- */
+  function buildSquare(n){
+    const pad = 26, gap = n <= 4 ? 12 : (n === 5 ? 10 : 8);
+    const s = (600 - pad*2 - gap*(n-1)) / n;
+    const rx = Math.min(16, s*0.18);
+    const out = [];
+    for(let r=0;r<n;r++) for(let c=0;c<n;c++){
+      const x = pad + c*(s+gap), y = pad + r*(s+gap);
+      out.push({
+        markup:`<rect x="${x.toFixed(2)}" y="${y.toFixed(2)}" width="${s.toFixed(2)}" height="${s.toFixed(2)}" rx="${rx.toFixed(2)}" ry="${rx.toFixed(2)}"/>`,
+        cx:x+s/2, cy:y+s/2, fs:s*0.42
+      });
+    }
+    return out;
+  }
+
+  /* ---------------- 布局：圆环（等面积分格） ---------------- */
+  const CX = 300, CY = 300, RAD = 274;
+  const pt = (r,a) => [CX + r*Math.cos(a), CY + r*Math.sin(a)];
+
+  function sectorPath(r0, r1, a0, a1){
+    const large = (a1 - a0) > Math.PI ? 1 : 0;
+    const [x1,y1] = pt(r1,a0), [x2,y2] = pt(r1,a1);
+    if(r0 <= 0.5){
+      return `M${CX} ${CY}L${x1.toFixed(2)} ${y1.toFixed(2)}A${r1.toFixed(2)} ${r1.toFixed(2)} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}Z`;
+    }
+    const [x3,y3] = pt(r0,a1), [x4,y4] = pt(r0,a0);
+    return `M${x1.toFixed(2)} ${y1.toFixed(2)}A${r1.toFixed(2)} ${r1.toFixed(2)} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`
+         + `L${x3.toFixed(2)} ${y3.toFixed(2)}A${r0.toFixed(2)} ${r0.toFixed(2)} 0 ${large} 0 ${x4.toFixed(2)} ${y4.toFixed(2)}Z`;
+  }
+
+  function buildRadial(n){
+    const counts = RING_PRESETS[n] || RING_PRESETS[5];
+    const N = counts.reduce((a,b)=>a+b, 0);
+    const out = [];
+    let cum = 0, rPrev = 0;
+
+    counts.forEach((count, ri) => {
+      cum += count;
+      // 半径按累计格数开方 → 每个扇环面积相等 → 每格面积相等
+      const rOuter = RAD * Math.sqrt(cum / N);
+      const rInner = rPrev + (ri === 0 ? 0 : 3);
+      const rOut   = rOuter - 3;
+      rPrev = rOuter;
+
+      if(count === 1){
+        out.push({ markup:`<circle cx="${CX}" cy="${CY}" r="${rOut.toFixed(2)}"/>`, ring:ri, cx:CX, cy:CY, fs:rOut*0.6 });
+        return;
+      }
+
+      const span = Math.PI*2 / count;
+      const gapA = Math.min(0.055, span*0.1);
+      const midR = (rInner + rOut)/2;
+      const fs   = Math.max(11, Math.min(46, Math.min(rOut - rInner, span*midR) * 0.44));
+
+      for(let j=0;j<count;j++){
+        const a0 = -Math.PI/2 + j*span + gapA/2;
+        const a1 = -Math.PI/2 + (j+1)*span - gapA/2;
+        const [tx,ty] = pt(midR, (a0+a1)/2);
+        out.push({ markup:`<path d="${sectorPath(rInner, rOut, a0, a1)}"/>`, ring:ri, cx:tx, cy:ty, fs:fs });
+      }
+    });
+    return out;
+  }
+
+  /* ---------------- 布局：星芒（Voronoi × 五角星） ---------------- */
+  // 先在一个单位圆里做 Voronoi（圆是凸的，半平面裁剪才成立），
+  // 再按角度把半径映射到五角星边界 —— 连续映射保证格子不会被切断。
+  const STAR_POINTS = 5;
+  const STAR_INNER  = 0.72;
+  const STAR_OUT    = 292;
+
+  const DOMAIN = (function(){
+    const p = [];
+    for(let i=0;i<96;i++){
+      const a = i/96*Math.PI*2;
+      p.push({ x: Math.cos(a), y: Math.sin(a) });
+    }
+    return p;
+  })();
+
+  // 单位星形在角度 θ 处的半径：射线与 10 条边求交
+  function starRadius(theta){
+    const n = STAR_POINTS * 2;
+    const ux = Math.cos(theta), uy = Math.sin(theta);
+    for(let i=0;i<n;i++){
+      const a0 = -Math.PI/2 + i*Math.PI/STAR_POINTS;
+      const a1 = -Math.PI/2 + (i+1)*Math.PI/STAR_POINTS;
+      const r0 = (i % 2) ? STAR_INNER : 1;
+      const r1 = (i % 2) ? 1 : STAR_INNER;
+      const x0 = Math.cos(a0)*r0, y0 = Math.sin(a0)*r0;
+      const x1 = Math.cos(a1)*r1, y1 = Math.sin(a1)*r1;
+      const dx = x1 - x0, dy = y1 - y0;
+      const den = ux*dy - uy*dx;
+      if(Math.abs(den) < 1e-9) continue;
+      const t = (x0*dy - y0*dx) / den;
+      const s = (ux*t - x0)*dx + (uy*t - y0)*dy;
+      const len2 = dx*dx + dy*dy;
+      if(t > 0 && s >= -1e-9 && s <= len2 + 1e-9) return t;
+    }
+    return 1;
+  }
+
+  function warp(p){
+    const r = Math.sqrt(p.x*p.x + p.y*p.y);
+    if(r < 1e-9) return { x: CX, y: CY };
+    const th = Math.atan2(p.y, p.x);
+    const R  = starRadius(th) * STAR_OUT;
+    return { x: CX + Math.cos(th)*r*R, y: CY + Math.sin(th)*r*R };
+  }
+
+  // Sutherland–Hodgman：保留 nx*x + ny*y <= c 的半平面
+  function clipHalf(poly, nx, ny, c){
+    const out = [];
+    for(let i=0;i<poly.length;i++){
+      const a = poly[i], b = poly[(i+1)%poly.length];
+      const da = nx*a.x + ny*a.y - c;
+      const db = nx*b.x + ny*b.y - c;
+      if(da <= 1e-9) out.push(a);
+      if((da < 0 && db > 0) || (da > 0 && db < 0)){
+        const t = da / (da - db);
+        out.push({ x: a.x + t*(b.x-a.x), y: a.y + t*(b.y-a.y) });
+      }
+    }
+    return out;
+  }
+
+  function voronoiCell(seeds, i){
+    let poly = DOMAIN;
+    const si = seeds[i];
+    for(let j=0;j<seeds.length && poly.length>2;j++){
+      if(j === i) continue;
+      const sj = seeds[j];
+      const nx = sj.x - si.x, ny = sj.y - si.y;
+      const c  = (sj.x*sj.x + sj.y*sj.y - si.x*si.x - si.y*si.y) / 2;
+      poly = clipHalf(poly, nx, ny, c);
+    }
+    return poly;
+  }
+
+  function polyInfo(poly){
+    let a = 0, cx = 0, cy = 0;
+    for(let i=0;i<poly.length;i++){
+      const p = poly[i], q = poly[(i+1)%poly.length];
+      const f = p.x*q.y - q.x*p.y;
+      a += f; cx += (p.x+q.x)*f; cy += (p.y+q.y)*f;
+    }
+    a *= 0.5;
+    if(Math.abs(a) < 1e-9) return { area:0, x:poly[0].x, y:poly[0].y };
+    return { area: Math.abs(a), x: cx/(6*a), y: cy/(6*a) };
+  }
+
+  function pointInPoly(pt, poly){
+    let inside = false;
+    for(let i=0,j=poly.length-1;i<poly.length;j=i++){
+      const a = poly[i], b = poly[j];
+      if(((a.y > pt.y) !== (b.y > pt.y)) &&
+         (pt.x < (b.x-a.x)*(pt.y-a.y)/(b.y-a.y) + a.x)) inside = !inside;
+    }
+    return inside;
+  }
+
+  // 重心到最近的边（决定字号，避免长条格里数字溢出）
+  function inradius(poly, c){
+    let m = Infinity;
+    for(let i=0;i<poly.length;i++){
+      const a = poly[i], b = poly[(i+1)%poly.length];
+      const dx = b.x-a.x, dy = b.y-a.y;
+      const len = Math.sqrt(dx*dx + dy*dy) || 1;
+      const d = Math.abs((c.x-a.x)*dy - (c.y-a.y)*dx) / len;
+      if(d < m) m = d;
+    }
+    return m === Infinity ? 0 : m;
+  }
+
+  function buildStarOnce(n){
+    const N = n*n;
+    let seeds = [];
+
+    // 最远点采样：疏密均匀，避免极小碎块
+    for(let i=0;i<N;i++){
+      let best = null, bestD = -1;
+      for(let k=0;k<40;k++){
+        const a = Math.random()*Math.PI*2, r = Math.sqrt(Math.random())*0.94;
+        const p = { x: Math.cos(a)*r, y: Math.sin(a)*r };
+        let d = Infinity;
+        for(const s of seeds) d = Math.min(d, (s.x-p.x)*(s.x-p.x) + (s.y-p.y)*(s.y-p.y));
+        if(d > bestD){ bestD = d; best = p; }
+      }
+      seeds.push(best);
+    }
+
+    // Lloyd 松弛：单位圆内两轮，面积趋同
+    for(let it=0; it<2; it++){
+      const next = [];
+      for(let i=0;i<N;i++){
+        const info = polyInfo(voronoiCell(seeds, i));
+        next.push(info.area > 1e-9 ? { x: info.x, y: info.y } : seeds[i]);
+      }
+      seeds = next;
+    }
+
+    const gap = 3.4;
+    const out = [];
+    for(let i=0;i<N;i++){
+      const poly = voronoiCell(seeds, i).map(warp);
+      if(poly.length < 3) continue;
+
+      let info = polyInfo(poly);
+      if(!pointInPoly(info, poly)){          // 极端拉伸时退回顶点均值
+        let sx = 0, sy = 0;
+        for(const p of poly){ sx += p.x; sy += p.y; }
+        info = { area: info.area, x: sx/poly.length, y: sy/poly.length };
+      }
+
+      const pts = poly.map(p => {
+        const dx = p.x - info.x, dy = p.y - info.y;
+        const len = Math.sqrt(dx*dx + dy*dy) || 1;
+        const k = Math.max(0.4, (len - gap) / len);
+        return `${(info.x + dx*k).toFixed(2)},${(info.y + dy*k).toFixed(2)}`;
+      });
+
+      const ir = inradius(poly, info);
+      out.push({
+        markup: `<polygon points="${pts.join(' ')}"/>`,
+        cx: info.x, cy: info.y, ir: ir,
+        fs: Math.max(13, Math.min(33, ir * 1.02))
+      });
+    }
+    return out;
+  }
+
+  // 星形的凹口会把格子压扁；重排几次，取“最小格”最大的一版
+  function buildStar(n){
+    let best = null;
+    for(let attempt=0; attempt<14; attempt++){
+      const cells = buildStarOnce(n);
+      if(cells.length < n*n) continue;
+      let minIR = Infinity;
+      for(const c of cells) minIR = Math.min(minIR, c.ir);
+      if(!best || minIR > best.minIR) best = { cells, minIR };
+      if(minIR >= 16) break;
+    }
+    return best ? best.cells : buildStarOnce(n);
+  }
+
+  /* ---------------- 渲染 ---------------- */
+  function build(){
+    if(state.shape === 'square') return buildSquare(state.n);
+    if(state.shape === 'radial') return buildRadial(state.n);
+    return buildStar(state.n);
+  }
+  function shuffled(arr){
+    for(let i=arr.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+    }
+    return arr;
+  }
+
+  function render(){
+    const cells = build();
+    const nums  = shuffled(Array.from({length:cells.length}, (_,i)=>i+1));
+    const parts = [];
+    let open = false, lastRing = null;
+
+    for(let i=0;i<cells.length;i++){
+      const c = cells[i];
+      const rk = (c.ring === undefined) ? null : c.ring;
+      if(rk !== lastRing){
+        if(open) parts.push('</g>');
+        open = false;
+        if(rk !== null){ parts.push(`<g class="ring" data-k="${rk}">`); open = true; }
+        lastRing = rk;
+      }
+      parts.push(
+        `<g class="cell">${c.markup}` +
+        `<text x="${c.cx.toFixed(2)}" y="${c.cy.toFixed(2)}" data-x="${c.cx.toFixed(2)}" data-y="${c.cy.toFixed(2)}" ` +
+        `font-size="${c.fs.toFixed(2)}" text-anchor="middle" dominant-baseline="central" data-i="${i}"></text></g>`
+      );
+    }
+    if(open) parts.push('</g>');
+
+    let html = parts.join('');
+    if(state.shape === 'radial'){
+      html += `<circle class="halo" cx="300" cy="300" r="279"/>`
+            + `<circle class="orbit" cx="300" cy="300" r="288"/>`;
+    }
+
+    board.innerHTML = html;
+    state.total = cells.length;
+    state.numOf = nums;          // 数字先存在内存里，倒计时结束才画到格子上
+    collectRings();
+  }
+
+  // 只在开局瞬间揭示数字：之前的棋盘是纯色块，没法提前记位置
+  function revealNumbers(){
+    const cells = board.querySelectorAll('.cell');
+    for(let i=0;i<cells.length;i++){
+      const g = cells[i];
+      const n = state.numOf[i];
+      if(n === undefined) continue;
+      g.dataset.num = n;
+      const t = g.querySelector('text');
+      if(t) t.textContent = n;
+    }
+  }
+
+  /* ---------------- 圆环动效 ---------------- */
+  function collectRings(){
+    rings = [];
+    if(state.shape !== 'radial') return;
+    board.querySelectorAll('g.ring').forEach(g => {
+      const k = parseInt(g.dataset.k, 10);
+      rings.push({
+        g: g,
+        speed: state.motion ? (ROT_SPEED[k % ROT_SPEED.length] || 0) : 0,
+        angle: k === 0 ? 0 : Math.random()*360,
+        texts: Array.from(g.querySelectorAll('text')).map(t => ({
+          el: t, x: parseFloat(t.dataset.x), y: parseFloat(t.dataset.y)
+        }))
+      });
+    });
+    rings.forEach(applyRing);
+    if(rings.length){ animT = 0; cancelAnimationFrame(animRAF); animRAF = requestAnimationFrame(animate); }
+  }
+
+  function applyRing(r){
+    if(!r.speed) return;
+    r.g.setAttribute('transform', `rotate(${r.angle.toFixed(2)} 300 300)`);
+    const inv = (-r.angle).toFixed(2);
+    for(const t of r.texts) t.el.setAttribute('transform', `rotate(${inv} ${t.x} ${t.y})`);
+  }
+
+  function animate(ts){
+    if(!rings.length){ animT = 0; return; }
+    const dt = Math.min(64, animT ? ts - animT : 16);
+    animT = ts;
+    for(const r of rings){
+      if(!r.speed) continue;
+      r.angle += r.speed * dt / 1000;
+      if(r.angle > 360) r.angle -= 360;
+      if(r.angle < -360) r.angle += 360;
+      applyRing(r);
+    }
+    animRAF = requestAnimationFrame(animate);
+  }
+
+  function setMotion(on){
+    state.motion = on;
+    for(const r of rings){
+      if(on){
+        r.speed = ROT_SPEED[parseInt(r.g.dataset.k, 10) % ROT_SPEED.length] || 0;
+      }else{
+        r.speed = 0;
+        r.angle = 0;
+        r.g.removeAttribute('transform');
+        for(const t of r.texts) t.el.removeAttribute('transform');
+      }
+    }
+    animT = 0;
+    if(on && rings.length){ cancelAnimationFrame(animRAF); animRAF = requestAnimationFrame(animate); }
+  }
+
+  /* 元素中心点（含所有变换），用于涟漪定位 */
+  function centerOf(g){
+    try{
+      const bb = g.getBBox();
+      const m  = g.getScreenCTM();
+      if(!m) return null;
+      const p = new DOMPoint(bb.x + bb.width/2, bb.y + bb.height/2).matrixTransform(m);
+      const q = new DOMPoint(p.x, p.y).matrixTransform(board.getScreenCTM().inverse());
+      return q;
+    }catch(e){
+      const r = g.getBoundingClientRect(), b = board.getBoundingClientRect();
+      if(!b.width) return null;
+      return { x:(r.left + r.width/2 - b.left)/b.width*600, y:(r.top + r.height/2 - b.top)/b.height*600 };
+    }
+  }
+
+  /* ---------------- 本机记录（走共享层） ---------------- */
+  const lbBest = () => Core.runs.best(GAME, boardKey());
+
+  function refreshBestLine(){
+    const r = lbBest();
+    elBest.textContent = r ? `最佳 ${fmt(r.t)} 秒 · ${r.s} 分` : '最佳 —';
+  }
+
+  function resetHud(){
+    elTime.textContent = '0.00';
+    elScore.textContent = '—';
+    elScore.className = '';
+    elErr.textContent = '0';
+    elBar.style.width = '0%';
+    elTarget.textContent = state.queue.length ? state.queue[0] : '1';
+  }
+
+  function shapeNameOf(s){
+    return s === 'square' ? '方形' : s === 'radial' ? '圆环' : '星芒';
+  }
+  function shapeName(){ return shapeNameOf(state.shape); }
+
+  /* ---------------- 开局 ---------------- */
+  let cancelCd = null;
+
+  function newRound(){
+    if(cancelCd){ cancelCd(); cancelCd = null; }
+    state.token++;
+    cancelAnimationFrame(state.raf);
+    state.started = false;
+    state.finished = false;
+    state.qi = 0;
+    state.errors = 0;
+    state.penalty = 0;
+
+    render();
+    board.classList.remove('fin');
+
+    const N = state.total;
+    state.queue = Array.from({length:N}, (_,i)=> state.reverse ? N - i : i + 1);
+    resetHud();
+    refreshBestLine();
+
+    const rec = lbBest();
+    Core.ui.overlay(
+      `<div class="panel-in">
+         <h2>${shapeName()} · ${state.n}×${state.n}${state.reverse?' · 倒序':''}</h2>
+         <div class="big">${rec ? fmt(rec.t) + '<small>s</small><em>最佳</em>' : N + '<small>格</small>'}</div>
+         <div class="meta">目标顺序 <b>${state.queue[0]} → ${state.queue[N-1]}</b><br>
+           ${rec ? `最佳评分 <b>${rec.s}</b> 分 · ` : ''}点错 +1 秒罚时</div>
+         <button class="btn" id="startBtn">开始游戏</button>
+         <div class="tiny">S 基准 ${parOf().toFixed(1)}s · ${gradeLines()}</div>
+       </div>`);
+    $('#startBtn').addEventListener('click', beginRound);
+  }
+
+  function beginRound(){
+    state.qi = 0;
+    state.errors = 0;
+    state.penalty = 0;
+    state.finished = false;
+    state.token++;
+    elErr.textContent = '0';
+    elTime.textContent = '0.00';
+    elScore.textContent = '—';
+    elScore.className = '';
+    elBar.style.width = '0%';
+    elTarget.textContent = state.queue[0];
+
+    if(cancelCd) cancelCd();
+    cancelCd = Core.ui.countdown(() => {
+      revealNumbers();                 // 数字与计时同时出现，杜绝提前记忆
+      state.started = true;
+      state.t0 = performance.now();
+      state.raf = requestAnimationFrame(tick);
+    });
+  }
+
+  function tick(){
+    if(!state.started) return;
+    const t = (performance.now() - state.t0)/1000 + state.penalty;
+    elTime.textContent = fmt(t);
+    if(t > 0.8){
+      const s = scoreOf(t);
+      elScore.textContent = s;
+      elScore.className = 'g-' + gradeOf(s);
+    }
+    state.raf = requestAnimationFrame(tick);
+  }
+
+  /* ---------------- 交互 ---------------- */
+  board.addEventListener('pointerdown', function(e){
+    const g = e.target.closest ? e.target.closest('.cell') : null;
+    if(!g || !state.started || state.finished) return;
+    if(g.classList.contains('done')) return;
+    const num = parseInt(g.dataset.num, 10);
+    if(num === state.queue[state.qi]) hit(g);
+    else miss(g);
+  });
+
+  function hit(g){
+    ripple(g);
+    g.classList.add('done');
+    Core.sfx.blip(540 + state.qi*11, 0.05, 'triangle');
+    state.qi++;
+    if(state.qi >= state.queue.length){ finish(); return; }
+    elTarget.textContent = state.queue[state.qi];
+    elBar.style.width = (state.qi / state.queue.length * 100).toFixed(1) + '%';
+  }
+
+  function miss(g){
+    state.errors++;
+    state.penalty += 1;
+    elErr.textContent = state.errors;
+    g.classList.add('wrong');
+    setTimeout(()=>g.classList.remove('wrong'), 260);
+    Core.sfx.blip(150, 0.13, 'square');
+  }
+
+  function ripple(g){
+    const c = centerOf(g);
+    if(!c) return;
+    const el = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    el.setAttribute('class', 'rip');
+    el.setAttribute('cx', c.x); el.setAttribute('cy', c.y); el.setAttribute('r', 16);
+    el.style.transformOrigin = c.x + 'px ' + c.y + 'px';
+    board.appendChild(el);
+    setTimeout(()=>el.remove(), 620);
+  }
+
+  function finish(){
+    cancelAnimationFrame(state.raf);
+    state.started = false;
+    state.finished = true;
+    elTarget.textContent = '✓';
+    board.classList.add('fin');
+    elBar.style.width = '100%';
+
+    const time  = (performance.now() - state.t0)/1000 + state.penalty;
+    const score = scoreOf(time);
+    const grade = gradeOf(score);
+    const prev  = lbBest();                        // 本机个人最好
+    const profile = Core.profile;
+    const run = {
+      id:   profile ? profile.id : '',
+      name: profile ? profile.name : '',
+      t: parseFloat(time.toFixed(2)),
+      s: score,
+      d: new Date().toISOString(),
+      mode: state.shape, size: state.n, rev: state.reverse
+    };
+    state.lastRun = run;
+    const improved = !prev || run.t < prev.t;
+
+    Core.runs.add(GAME, boardKey(), run);
+
+    elTime.textContent = fmt(time);
+    elScore.textContent = score;
+    elScore.className = 'g-' + grade;
+
+    const avg = time / state.queue.length;
+    const deltaTxt = prev
+      ? (improved ? `比个人最好快 <b>${fmt(prev.t - run.t)}</b>s` : `比个人最好慢 <b>${fmt(run.t - prev.t)}</b>s`)
+      : '首局记录';
+
+    Core.sfx.fanfare(grade);
+
+    const who = profile
+      ? `${esc(profile.name)}${profile.id ? `<em style="color:#5d6a88;font-style:normal;font-size:11px">${tagOf(profile.id)}</em>` : ''}`
+      : '';
+
+    Core.ui.overlay(
+      `<div class="panel-in">
+         <h2>完成 · ${shapeName()} ${state.n}×${state.n}${state.reverse?' 倒序':''}</h2>
+         <div class="scoreRow">
+           <div class="badge g-${grade}">${grade}</div>
+           <div class="big">${fmt(time)}<small>秒</small></div>
+         </div>
+         <div class="meta"><span class="nw">评分 <b class="g-${grade}">${score}</b> 分</span> · <span class="nw">失误 <b>${state.errors}</b> 次</span> · <span class="nw">均速 <b>${avg.toFixed(2)}</b>s/格</span></div>
+         <div class="meta">${improved ? '<span class="rec">★ 个人最好</span>' : deltaTxt}</div>
+         ${who ? `<div class="meta" style="font-size:12px">${who}</div>` : ''}
+         <div class="tiny" id="postMsg" style="min-height:15px"></div>
+         <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+           <button class="btn" id="againBtn">再来一局</button>
+           <button class="btn ghost" id="lbBtn">看排行榜</button>
+         </div>
+         <div class="tiny">S 基准 ${parOf().toFixed(1)}s · ${gradeLines()}</div>
+       </div>`);
+
+    const msg = $('#postMsg');
+    if(!Core.online){
+      msg.textContent = improved ? '本机最好成绩已刷新' : `未破个人最好 ${fmt(prev.t)} 秒`;
+    }else if(profile && profile.id){
+      pushRun(run);                                // 有档案就自动上榜，不需要点按钮
+    }else{
+      msg.style.color = 'var(--dim)';
+      msg.textContent = '离线档案：连上服务器后可自动上榜';
+    }
+
+    $('#againBtn').addEventListener('click', newRound);
+    $('#lbBtn').addEventListener('click', function(){ openLB(); });
+
+    refreshBestLine();
+  }
+
+  async function pushRun(rec){
+    if(!Core.online || !rec) return;
+    const msg = $('#postMsg');
+    // 昵称由服务端根据 id 查表，前端不用传
+    try{
+      const r = await Core.api.post(GAME, { mode: rec.mode, size: rec.size, rev: rec.rev }, rec.id, rec.t, rec.s);
+      if(msg){
+        msg.style.color = 'var(--acc2)';
+        msg.innerHTML = r.improved
+          ? `已自动上榜 · 全球第 <b>${r.rank}</b> 名`
+          : `未破个人最好 <b>${fmt(r.best.t)}</b> 秒，榜单保持不变`;
+      }
+    }catch(e){
+      if(msg){
+        msg.style.color = 'var(--bad)';
+        msg.textContent = e.message === 'invalid score'
+          ? '成绩未通过服务端校验（用时过短或数值异常），未上榜'
+          : '上榜失败：' + e.message;
+      }
+    }
+  }
+
+  /* ---------------- 排行榜 ---------------- */
+  function openLB(){
+    Core.lb.open({
+      game: GAME,
+      title: '排行榜',
+      rev: true,
+      groups: [
+        { key:'shape', value: state.shape, items:[
+          {v:'square', label:'方形'}, {v:'radial', label:'圆环'}, {v:'star', label:'星芒'} ] },
+        { key:'size', value: state.n, items:[
+          {v:4, label:'4×4'}, {v:5, label:'5×5'}, {v:6, label:'6×6'} ] }
+      ],
+      board: v => ({ mode: v.shape, size: Number(v.size), rev: !!v.rev }),
+      subtitle: v => `${shapeNameOf(v.shape)} ${v.size}×${v.size} · ${v.rev ? '倒序' : '正序'}`,
+      best: arr => arr.reduce((a, r) => (r.t < a.t ? r : a)),
+      localRow: (r, isBest) => `
+        <span class="rk">${isBest ? '★' : ''}</span>
+        <span class="t">${fmt(r.t)}<small>秒</small></span>
+        <span class="s g-${gradeOf(r.s)}">${r.s}</span>
+        <span class="d">${shortDate(r.d)}</span>`,
+      globalRow: (r, i, me) => `
+        <span class="rk rk${i+1}">${i+1}</span>
+        <span class="nm"><b>${esc(r.name || '匿名')}</b><em>${tagOf(r.id)}</em>${me ? ' <small style="color:var(--acc2);font-weight:600">我</small>' : ''}</span>
+        <span class="t">${fmt(r.t)}<small>秒</small></span>
+        <span class="s g-${gradeOf(r.s)}">${r.s}</span>`
+    });
+  }
+
+  /* ---------------- 配置 ---------------- */
+  function bindSeg(sel, key, cast){
+    const box = $(sel);
+    box.addEventListener('click', function(e){
+      const b = e.target.closest('button');
+      if(!b || b.classList.contains('on')) return;
+      Array.from(box.children).forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+      state[key] = cast(b.dataset.v);
+      newRound();
+    });
+  }
+  bindSeg('#shapeSeg', 'shape', v=>v);
+  bindSeg('#sizeSeg', 'n', v=>parseInt(v,10));
+
+  $('#motion').addEventListener('click', function(){
+    const on = !this.classList.contains('on');
+    this.classList.toggle('on', on);
+    setMotion(on);
+  });
+
+  $('#rev').addEventListener('click', function(){
+    state.reverse = !state.reverse;
+    this.classList.toggle('on', state.reverse);
+    newRound();
+  });
+
+  $('#again2').addEventListener('click', newRound);
+
+  Core.mountTopbar({ title: '舒尔特方格', sub: 'SHAPES', onLB: openLB });
+
+  window.addEventListener('keydown', function(e){
+    if(Core.gate.isOpen) return;
+    const lbOpen = $('#lb').classList.contains('show');
+    if(!lbOpen && (e.code === 'Space' || e.code === 'Enter')){
+      e.preventDefault();
+      const b = overlay.querySelector('button');
+      if(b) b.click();
+    }
+    if(!lbOpen && (e.key === 'r' || e.key === 'R')) newRound();
+  });
+
+  /* ---------------- 启动 ---------------- */
+  (async function boot(){
+    const info = await Core.ready;
+
+    // 带档案号的链接登录失败：照样能玩，只是先建档
+    if(info.link.tried && !info.link.ok && info.link.error !== 'offline'){
+      newRound();
+      Core.gate.open(() => newRound());
+      Core.gate.msg(info.link.error === 'not found' ? '链接里的档案号不存在' : ('登录失败：' + info.link.error));
+      return;
+    }
+
+    newRound();
+    if(!Core.profile) Core.gate.open(() => newRound());
+  })();
+})();
+</script>
+</body>
+</html>

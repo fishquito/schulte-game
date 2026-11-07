@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>N-back · 专注力训练馆</title>
+<meta name="theme-color" content="#070a12">
+<link rel="icon" type="image/svg+xml" href="../shared/favicon.svg">
+<link rel="stylesheet" href="../shared/core.css">
+<style>
+  .stage{
+    display:flex;flex-direction:column;gap:14px;
+    background:linear-gradient(180deg,#111a2b,#0b111e);
+    border:1px solid var(--line);border-radius:20px;padding:18px;
+    min-height:min(56vh,380px);transition:border-color .15s,background .15s;
+  }
+  .stage.miss{border-color:var(--bad)}
+  .stim{flex:1;display:grid;place-items:center;min-height:130px}
+  .digit{
+    font-size:clamp(72px,20vmin,140px);font-weight:800;line-height:1;color:var(--txt);
+    font-variant-numeric:tabular-nums;user-select:none;-webkit-user-select:none;transition:color .12s;
+  }
+  .digit.pop{animation:stimPop .16s cubic-bezier(.2,1.6,.4,1)}
+  @keyframes stimPop{from{transform:scale(.82);opacity:.3}to{transform:scale(1);opacity:1}}
+  .digit.ok{color:var(--acc2)}
+  .digit.bad{color:var(--bad)}
+
+  .tick{height:4px;border-radius:4px;background:#141c2e;overflow:hidden}
+  .tick i{display:block;height:100%;width:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
+
+  .same{
+    width:100%;border:0;border-radius:14px;padding:16px;font:inherit;font-size:16px;font-weight:750;
+    letter-spacing:.16em;color:#06121c;background:linear-gradient(135deg,var(--acc2),var(--acc));
+    cursor:pointer;box-shadow:0 8px 26px rgba(76,201,240,.28);transition:transform .1s;
+  }
+  .same:active{transform:scale(.985)}
+  .same:disabled{opacity:.35;cursor:default;box-shadow:none}
+
+  .seg.sm button{padding:5px 9px;font-size:11.5px}
+</style>
+</head>
+<body class="play">
+<div class="app">
+  <div class="hud">
+    <div class="stat"><b id="idx">0/36</b><small>进度</small></div>
+    <div class="stat"><b id="hits">0</b><small>正确</small></div>
+    <div class="stat"><b id="miss">0</b><small>错误</small></div>
+    <div class="stat"><b id="lvl">2</b><small>back</small></div>
+  </div>
+
+  <div class="prog"><i id="bar"></i></div>
+
+  <div class="stage" id="stage">
+    <div class="stim"><div class="digit" id="digit">–</div></div>
+    <div class="tick"><i id="tickBar"></i></div>
+    <button class="same" id="same">相同</button>
+    <div class="veil"></div>
+  </div>
+
+  <div class="subrow">
+    <span id="bestLine">最佳 —</span>
+    <div class="acts">
+      <div class="seg sm" id="nSeg">
+        <button data-v="1">1-back</button>
+        <button data-v="2" class="on">2-back</button>
+        <button data-v="3">3-back</button>
+      </div>
+      <button class="toggle" id="again">重开</button>
+    </div>
+  </div>
+</div>
+
+<script src="../shared/core.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  const { $, esc, fmt, tagOf, shortDate } = Core.util;
+  const GAME = 'nback';
+  const { grade } = Core;
+
+  const TRIALS = 36;         // 一局多少个刺激
+  const DUR = 1600;          // 每个刺激停留多久（毫秒）
+  const MATCH_RATE = 0.30;   // 匹配题占比
+
+  // S 级基准：答对多少题。n 越大越难，基准越低
+  const PAR = { 1: 32, 2: 26, 3: 21 };
+  const scoreOf = (correct, n) => Math.max(0, Math.min(150, Math.round(correct / PAR[n] * 100)));
+  const totalOf = n => TRIALS - n;    // 前 n 个没有可比对象，不计分
+
+  const elIdx = $('#idx'), elHits = $('#hits'), elMiss = $('#miss'), elLvl = $('#lvl');
+  const elBar = $('#bar'), elBest = $('#bestLine');
+  const stage = $('#stage'), digitEl = $('#digit'), tickBar = $('#tickBar'), sameBtn = $('#same');
+
+  const state = {
+    n: 2, seq: [], i: 0, answered: false,
+    hits: 0, misses: 0, rtSum: 0, rtN: 0,
+    running: false, trialAt: 0, raf: 0,
+    token: 0
+  };
+
+  const boardKey = () => 'num|' + state.n + '|f';
+
+  function bestBy(arr){
+    if(!arr.length) return null;
+    return arr.reduce((a, r) => (r.s > a.s || (r.s === a.s && r.t < a.t)) ? r : a);
+  }
+
+  function paintHud(){
+    elHits.textContent = state.hits;
+    elMiss.textContent = state.misses;
+    elLvl.textContent = state.n;
+  }
+
+  function refreshBestLine(){
+    const r = bestBy(Core.runs.of(GAME, boardKey()));
+    elBest.textContent = r ? `最佳 ${r.s} 题 · ${scoreOf(r.s, r.size)} 分` : '最佳 —';
+  }
+
+  /* ---------------- 出题 ---------------- */
+  function genSeq(n){
+    const seq = [];
+    for(let i = 0; i < TRIALS; i++){
+      if(i >= n && Math.random() < MATCH_RATE){
+        seq.push(seq[i - n]);                        // 强制匹配
+        continue;
+      }
+      let d;
+      do { d = 1 + Math.floor(Math.random() * 9); }
+      while(i >= n && d === seq[i - n]);             // 非匹配题不撞车
+      seq.push(d);
+    }
+    return seq;
+  }
+
+  function showTrial(){
+    state.answered = false;
+    state.trialAt = performance.now();
+    elIdx.textContent = (state.i + 1) + '/' + TRIALS;
+    elBar.style.width = (state.i / TRIALS * 100).toFixed(1) + '%';
+
+    digitEl.textContent = state.seq[state.i];
+    digitEl.className = 'digit';
+    void digitEl.offsetWidth;
+    digitEl.classList.add('pop');
+    tickBar.style.width = '100%';
+  }
+
+  function loop(){
+    if(!state.running) return;
+    const el = performance.now() - state.trialAt;
+    tickBar.style.width = Math.max(0, (1 - el / DUR) * 100).toFixed(1) + '%';
+    if(el >= DUR){ endTrial(); return; }
+    state.raf = requestAnimationFrame(loop);
+  }
+
+  function endTrial(){
+    const i = state.i;
+    // 该按没按
+    if(i >= state.n && state.seq[i] === state.seq[i - state.n] && !state.answered){
+      state.misses++;
+      paintHud();
+      stage.classList.add('miss');
+      Core.sfx.blip(180, 0.1, 'square');
+      setTimeout(() => stage.classList.remove('miss'), 220);
+    }
+
+    state.i++;
+    if(state.i >= TRIALS){ finish(); return; }
+    showTrial();
+    state.raf = requestAnimationFrame(loop);
+  }
+
+  /* ---------------- 作答 ---------------- */
+  function press(){
+    if(!state.running || state.answered) return;
+    state.answered = true;
+
+    const i = state.i;
+    if(i < state.n) return;                          // 热身期，按了也不算
+
+    const isMatch = state.seq[i] === state.seq[i - state.n];
+    const rt = (performance.now() - state.trialAt) / 1000;
+
+    if(isMatch){
+      state.hits++; state.rtSum += rt; state.rtN++;
+      digitEl.classList.add('ok');
+      Core.sfx.blip(680, 0.05, 'triangle');
+    }else{
+      state.misses++;
+      digitEl.classList.add('bad');
+      Core.sfx.blip(150, 0.12, 'square');
+    }
+    paintHud();
+  }
+
+  sameBtn.addEventListener('pointerdown', e => { e.preventDefault(); press(); });
+
+  /* ---------------- 一局 ---------------- */
+  function newRound(){
+    stop();
+    state.seq = []; state.i = 0; state.answered = false;
+    state.hits = 0; state.misses = 0; state.rtSum = 0; state.rtN = 0;
+    paintHud();
+    elIdx.textContent = '0/' + TRIALS;
+    elBar.style.width = '0%';
+    digitEl.textContent = '–';
+    digitEl.className = 'digit';
+    tickBar.style.width = '100%';
+    refreshBestLine();
+
+    const rec = bestBy(Core.runs.of(GAME, boardKey()));
+    const par = PAR[state.n];
+    Core.ui.overlay(
+      `<div class="panel-in">
+         <h2>N-back · ${state.n}-back</h2>
+         <div class="big">${rec ? rec.s + '<small>题</small><em>最佳</em>' : par + '<small>题</small><em>S 线</em>'}</div>
+         <div class="meta">当前数字和 <b>${state.n} 步前</b>那个一样就点「相同」<br>
+           共 ${TRIALS} 个，前 ${state.n} 个是热身，不计分</div>
+         <button class="btn" id="startBtn">开始游戏</button>
+         <div class="tiny">S 基准 ${par} / ${totalOf(state.n)} 题 · 每个数字 1.6 秒</div>
+       </div>`);
+    $('#startBtn').addEventListener('click', beginRound);
+  }
+
+  function beginRound(){
+    stop();
+    const tok = ++state.token;
+    state.seq = genSeq(state.n);
+    state.i = 0;
+    state.hits = 0; state.misses = 0; state.rtSum = 0; state.rtN = 0;
+    paintHud();
+    elBar.style.width = '0%';
+    sameBtn.disabled = true;
+
+    Core.ui.countdown(() => {
+      if(tok !== state.token) return;
+      state.running = true;
+      sameBtn.disabled = false;
+      showTrial();
+      state.raf = requestAnimationFrame(loop);
+    });
+  }
+
+  function stop(){
+    state.running = false;
+    cancelAnimationFrame(state.raf);
+    sameBtn.disabled = true;
+  }
+
+  function finish(){
+    stop();
+    elBar.style.width = '100%';
+    digitEl.textContent = '–';
+    digitEl.className = 'digit';
+
+    const n = state.n;
+    const total = totalOf(n);
+    const correct = state.hits, wrong = state.misses;
+    const acc = total ? Math.round(correct / total * 100) : 0;
+    const score = scoreOf(correct, n);
+    const g = grade(score);
+    const rt = state.rtN ? state.rtSum / state.rtN : 0;
+    const prev = bestBy(Core.runs.of(GAME, boardKey()));
+
+    const run = {
+      id: Core.profile ? Core.profile.id : '',
+      name: Core.profile ? Core.profile.name : '',
+      t: parseFloat((rt || 8).toFixed(3)),
+      s: correct,
+      d: new Date().toISOString(),
+      mode: 'num', size: n, rev: false
+    };
+    const improved = !prev || run.s > prev.s || (run.s === prev.s && run.t < prev.t);
+    Core.runs.add(GAME, boardKey(), run);
+
+    Core.sfx.fanfare(g);
+    const who = Core.profile
+      ? esc(Core.profile.name) + (Core.profile.id ? `<em style="color:#5d6a88;font-style:normal;font-size:11px">${tagOf(Core.profile.id)}</em>` : '')
+      : '';
+
+    Core.ui.overlay(
+      `<div class="panel-in">
+         <h2>完成 · ${n}-back</h2>
+         <div class="scoreRow">
+           <div class="badge g-${g}">${g}</div>
+           <div class="big">${correct}<small>题</small></div>
+         </div>
+         <div class="meta"><span class="nw">评分 <b class="g-${g}">${score}</b> 分</span> · <span class="nw">错误 <b>${wrong}</b> 次</span> · <span class="nw">准确率 <b>${acc}%</b></span></div>
+         <div class="meta"><span class="nw">平均反应 <b>${rt ? rt.toFixed(2) : '—'}</b> 秒</span> · <span class="nw">计分题 <b>${total}</b> 个</span></div>
+         <div class="meta">${improved ? '<span class="rec">★ 个人最好</span>' : '未破个人最好 ' + (prev ? prev.s + ' 题' : '—')}</div>
+         ${who ? `<div class="meta" style="font-size:12px">${who}</div>` : ''}
+         <div class="tiny" id="postMsg" style="min-height:15px"></div>
+         <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+           <button class="btn" id="againBtn">再来一局</button>
+           <button class="btn ghost" id="lbBtn">看排行榜</button>
+         </div>
+         <div class="tiny">S 基准 ${PAR[n]} 题 · 1-back 轻松，3-back 会很吃力</div>
+       </div>`);
+
+    const msg = $('#postMsg');
+    if(!Core.online){
+      msg.textContent = improved ? '本机最好成绩已刷新' : '未破个人最好';
+    }else if(Core.profile && Core.profile.id){
+      pushRun(run);
+    }else{
+      msg.style.color = 'var(--dim)';
+      msg.textContent = '离线档案：连上服务器后可自动上榜';
+    }
+
+    $('#againBtn').addEventListener('click', newRound);
+    $('#lbBtn').addEventListener('click', openLB);
+    refreshBestLine();
+  }
+
+  async function pushRun(rec){
+    if(!Core.online) return;
+    const msg = $('#postMsg');
+    try{
+      const r = await Core.api.post(GAME, { mode:'num', size:state.n, rev:false }, rec.id, rec.t, rec.s);
+      if(msg){
+        msg.style.color = 'var(--acc2)';
+        msg.innerHTML = r.improved
+          ? `已自动上榜 · 全球第 <b>${r.rank}</b> 名`
+          : '未破个人最好，榜单保持不变';
+      }
+    }catch(e){
+      if(msg){
+        msg.style.color = 'var(--bad)';
+        msg.textContent = e.message === 'invalid score' ? '成绩未通过服务端校验，未上榜' : '上榜失败：' + e.message;
+      }
+    }
+  }
+
+  /* ---------------- 排行榜 ---------------- */
+  function openLB(){
+    Core.lb.open({
+      game: GAME,
+      title: '排行榜',
+      groups: [
+        { key:'n', value: state.n, items:[
+          {v:1, label:'1-back'}, {v:2, label:'2-back'}, {v:3, label:'3-back'} ] }
+      ],
+      board: v => ({ mode:'num', size: Number(v.n), rev:false }),
+      subtitle: v => `${v.n}-back · 答对越多越好`,
+      best: arr => arr.reduce((a, r) => (r.s > a.s || (r.s === a.s && r.t < a.t) ? r : a)),
+      localRow: (r, best) => `
+        <span class="rk">${best ? '★' : ''}</span>
+        <span class="t">${r.s}<small>题</small></span>
+        <span class="s g-${grade(scoreOf(r.s, r.size))}">${scoreOf(r.s, r.size)}</span>
+        <span class="d">${shortDate(r.d)}</span>`,
+      globalRow: (r, i, me) => `
+        <span class="rk rk${i+1}">${i+1}</span>
+        <span class="nm"><b>${esc(r.name || '匿名')}</b><em>${tagOf(r.id)}</em>${me ? ' <small style="color:var(--acc2);font-weight:600">我</small>' : ''}</span>
+        <span class="t">${r.s}<small>题</small></span>
+        <span class="s g-${grade(scoreOf(r.s, state.n))}">${scoreOf(r.s, state.n)}</span>`
+    });
+  }
+
+  /* ---------------- 配置 ---------------- */
+  $('#nSeg').addEventListener('click', function(e){
+    const b = e.target.closest('button');
+    if(!b || b.classList.contains('on')) return;
+    Array.from(this.children).forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    state.n = parseInt(b.dataset.v, 10);
+    newRound();
+  });
+
+  $('#again').addEventListener('click', newRound);
+
+  window.addEventListener('keydown', function(e){
+    if(Core.gate.isOpen) return;
+    if($('#lb').classList.contains('show')) return;
+    if(e.code === 'Space' || e.code === 'Enter' || e.key === 'j' || e.key === 'J'){
+      e.preventDefault();
+      if(state.running) press();
+      else { const b = $('.veil').querySelector('button'); if(b) b.click(); }
+    }
+  });
+
+  /* ---------------- 启动 ---------------- */
+  (async function boot(){
+    Core.mountTopbar({ title:'N-back', sub:'MEMORY', onLB: openLB });
+    const info = await Core.ready;
+
+    if(info.link.tried && !info.link.ok && info.link.error !== 'offline'){
+      newRound();
+      Core.gate.open(() => newRound());
+      Core.gate.msg(info.link.error === 'not found' ? '链接里的档案号不存在' : ('登录失败：' + info.link.error));
+      return;
+    }
+    newRound();
+    if(!Core.profile) Core.gate.open(() => newRound());
+  })();
+})();
+</script>
+</body>
+</html>

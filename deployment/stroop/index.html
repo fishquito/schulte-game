@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="color-scheme" content="dark">
+<title>色字冲突 · 专注力训练馆</title>
+<meta name="theme-color" content="#070a12">
+<link rel="icon" type="image/svg+xml" href="../shared/favicon.svg">
+<link rel="stylesheet" href="../shared/core.css">
+<style>
+  .stage{
+    display:flex;flex-direction:column;gap:16px;
+    background:linear-gradient(180deg,#111a2b,#0b111e);
+    border:1px solid var(--line);border-radius:20px;padding:18px;
+    min-height:min(58vh,400px);
+  }
+  .wordWrap{flex:1;display:grid;place-items:center;min-height:120px}
+  .word{
+    font-size:clamp(58px,15vmin,112px);font-weight:820;line-height:1;letter-spacing:.06em;
+    user-select:none;-webkit-user-select:none;transition:color .08s;
+  }
+  .word.pop{animation:wordPop .18s cubic-bezier(.2,1.6,.4,1)}
+  @keyframes wordPop{from{transform:scale(.86);opacity:.35}to{transform:scale(1);opacity:1}}
+
+  .choices{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+  .choices button{
+    border-radius:14px;padding:14px 0;font:inherit;font-size:19px;font-weight:750;letter-spacing:.08em;
+    color:#eef4ff;cursor:pointer;transition:transform .1s,background .12s,border-color .12s;
+    background:color-mix(in srgb, var(--c) 14%, #0d1524);
+    border:1px solid color-mix(in srgb, var(--c) 40%, #1b2438);
+  }
+  .choices button:hover{background:color-mix(in srgb, var(--c) 24%, #0d1524)}
+  .choices button:active{transform:scale(.96)}
+  .choices button.ok{background:color-mix(in srgb, var(--c) 52%, #0d1524);border-color:var(--c)}
+  .choices button.bad{background:#3a1220;border-color:var(--bad)}
+  .stage.lock .choices{pointer-events:none;opacity:.75}
+  .stage.shake{animation:shake .22s ease-in-out}
+  @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-5px)}75%{transform:translateX(5px)}}
+
+  .seg.sm button{padding:5px 9px;font-size:11.5px}
+</style>
+</head>
+<body class="play">
+<div class="app">
+  <div class="hud">
+    <div class="stat"><b id="time">30.0</b><small>秒</small></div>
+    <div class="stat"><b id="hits">0</b><small>答对</small></div>
+    <div class="stat"><b id="miss">0</b><small>答错</small></div>
+    <div class="stat"><b id="rt">—</b><small>平均反应</small></div>
+  </div>
+
+  <div class="prog"><i id="bar"></i></div>
+
+  <div class="stage" id="stage">
+    <div class="wordWrap"><div class="word" id="word">准备</div></div>
+    <div class="choices" id="choices"></div>
+    <div class="veil"></div>
+  </div>
+
+  <div class="subrow">
+    <span id="bestLine">最佳 —</span>
+    <div class="acts">
+      <div class="seg sm" id="durSeg">
+        <button data-v="30" class="on">30 秒</button>
+        <button data-v="60">60 秒</button>
+      </div>
+      <button class="toggle" id="again">重开</button>
+    </div>
+  </div>
+</div>
+
+<script src="../shared/core.js"></script>
+<script>
+(function(){
+  'use strict';
+
+  const { $, esc, fmt, tagOf, shortDate } = Core.util;
+  const GAME = 'stroop';
+  const { grade } = Core;
+
+  /* 四种颜色。刻意避开红绿的「对立」组合（红偏粉、绿偏薄荷），
+     在常见色觉异常下也能靠明度区分。 */
+  const COLORS = [
+    { name:'红', c:'#ff5d7a' },
+    { name:'黄', c:'#ffd166' },
+    { name:'蓝', c:'#4cc9f0' },
+    { name:'绿', c:'#7cf5c4' }
+  ];
+  const CONFLICT_RATE = 0.72;       // 冲突题占比：字义和墨色不一致
+
+  // S 级基准：30 秒答对 20 题（平均 1.5 秒一题）
+  const PAR = { 30: 20, 60: 40 };
+  const scoreOf = (hits, dur) => Math.max(0, Math.min(150, Math.round(hits / PAR[dur] * 100)));
+
+  const elTime = $('#time'), elHits = $('#hits'), elMiss = $('#miss'), elRt = $('#rt');
+  const elBar  = $('#bar'), elBest = $('#bestLine');
+  const stage  = $('#stage'), wordEl = $('#word'), choicesEl = $('#choices');
+
+  const state = {
+    duration: 30, running: false, locked: false,
+    hits: 0, misses: 0, rtSum: 0, rtN: 0,
+    q: null, qAt: 0, t0: 0, raf: 0
+  };
+
+  const boardKey = () => 'std|' + state.duration + '|f';
+  const lbBest = () => Core.runs.best(GAME, boardKey());
+
+  function bestBy(arr){
+    if(!arr.length) return null;
+    return arr.reduce((a, r) => {
+      if(r.s !== a.s) return r.s > a.s ? r : a;
+      return r.t < a.t ? r : a;
+    });
+  }
+
+  /* ---------------- HUD ---------------- */
+  function paintHud(){
+    elHits.textContent = state.hits;
+    elMiss.textContent = state.misses;
+    elRt.textContent = state.rtN ? (state.rtSum / state.rtN).toFixed(2) : '—';
+  }
+
+  function refreshBestLine(){
+    const r = bestBy(Core.runs.of(GAME, boardKey()));
+    elBest.textContent = r ? `最佳 ${r.s} 题 · ${scoreOf(r.s, r.size)} 分` : '最佳 —';
+  }
+
+  /* ---------------- 选项按钮 ---------------- */
+  function buildChoices(){
+    choicesEl.innerHTML = COLORS.map((c, i) =>
+      `<button data-i="${i}" style="--c:${c.c}">${c.name}</button>`).join('');
+  }
+
+  function clearMarks(){
+    choicesEl.querySelectorAll('button').forEach(b => b.classList.remove('ok', 'bad'));
+  }
+
+  /* ---------------- 出题 ---------------- */
+  function nextQuestion(){
+    let w, ink;
+    if(Math.random() < CONFLICT_RATE){
+      w = Math.floor(Math.random() * COLORS.length);
+      do { ink = Math.floor(Math.random() * COLORS.length); } while(ink === w);
+    }else{
+      w = ink = Math.floor(Math.random() * COLORS.length);
+    }
+    state.q = { word: w, ink: ink };
+    state.qAt = performance.now();
+
+    wordEl.textContent = COLORS[w].name;
+    wordEl.style.color = COLORS[ink].c;
+    wordEl.classList.remove('pop');
+    void wordEl.offsetWidth;
+    wordEl.classList.add('pop');
+    clearMarks();
+  }
+
+  /* ---------------- 作答 ---------------- */
+  function answer(pick){
+    if(!state.running || state.locked || !state.q) return;
+    const rt = (performance.now() - state.qAt) / 1000;
+    const btn = choicesEl.querySelector(`button[data-i="${pick}"]`);
+
+    if(pick === state.q.ink){
+      state.hits++;
+      state.rtSum += rt; state.rtN++;
+      if(btn) btn.classList.add('ok');
+      Core.sfx.blip(500 + state.hits * 14, 0.05, 'triangle');
+      paintHud();
+      nextQuestion();
+      return;
+    }
+
+    state.misses++;
+    if(btn) btn.classList.add('bad');
+    stage.classList.add('shake');
+    Core.sfx.blip(150, 0.12, 'square');
+    paintHud();
+
+    // 答错锁 300ms 再换下一题，防止连点蒙对
+    state.locked = true;
+    stage.classList.add('lock');
+    setTimeout(() => {
+      stage.classList.remove('shake', 'lock');
+      state.locked = false;
+      if(state.running) nextQuestion();
+    }, 300);
+  }
+
+  choicesEl.addEventListener('pointerdown', e => {
+    const b = e.target.closest('button');
+    if(!b) return;
+    answer(parseInt(b.dataset.i, 10));
+  });
+
+  /* ---------------- 一局 ---------------- */
+  function newRound(){
+    stop();
+    state.hits = 0; state.misses = 0; state.rtSum = 0; state.rtN = 0;
+    paintHud();
+    elTime.textContent = state.duration.toFixed(1);
+    elBar.style.width = '100%';
+    wordEl.textContent = '准备';
+    wordEl.style.color = 'var(--txt)';
+    clearMarks();
+    refreshBestLine();
+
+    const rec = bestBy(Core.runs.of(GAME, boardKey()));
+    const par = PAR[state.duration];
+    Core.ui.overlay(
+      `<div class="panel-in">
+         <h2>色字冲突 · ${state.duration} 秒</h2>
+         <div class="big">${rec ? rec.s + '<small>题</small><em>最佳</em>' : par + '<small>题</small><em>S 线</em>'}</div>
+         <div class="meta">点<b>字是什么颜色</b>，不要念字面<br>答错不扣分，但会锁 300ms</div>
+         <button class="btn" id="startBtn">开始游戏</button>
+         <div class="tiny">S 基准 ${par} 题 / ${state.duration} 秒 · A 线 ${Math.round(par * 0.8)} 题</div>
+       </div>`);
+    $('#startBtn').addEventListener('click', beginRound);
+  }
+
+  function beginRound(){
+    stop();
+    state.hits = 0; state.misses = 0; state.rtSum = 0; state.rtN = 0;
+    state.locked = false;
+    paintHud();
+    elBar.style.width = '100%';
+    stage.classList.remove('lock', 'shake');
+
+    Core.ui.countdown(() => {
+      state.running = true;
+      state.t0 = performance.now();
+      nextQuestion();
+      state.raf = requestAnimationFrame(tick);
+    });
+  }
+
+  function tick(){
+    if(!state.running) return;
+    const left = state.duration - (performance.now() - state.t0) / 1000;
+    if(left <= 0){ finish(); return; }
+    elTime.textContent = left.toFixed(1);
+    elBar.style.width = (left / state.duration * 100).toFixed(1) + '%';
+    state.raf = requestAnimationFrame(tick);
+  }
+
+  function stop(){
+    state.running = false;
+    cancelAnimationFrame(state.raf);
+  }
+
+  function finish(){
+    stop();
+    elTime.textContent = '0.0';
+    elBar.style.width = '0%';
+
+    const hits = state.hits, miss = state.misses;
+    const score = scoreOf(hits, state.duration);
+    const g = grade(score);
+    const rt = state.rtN ? state.rtSum / state.rtN : 0;
+    const acc = hits + miss ? Math.round(hits / (hits + miss) * 100) : 0;
+    const prev = bestBy(Core.runs.of(GAME, boardKey()));
+
+    const run = {
+      id: Core.profile ? Core.profile.id : '',
+      name: Core.profile ? Core.profile.name : '',
+      t: parseFloat((state.rtN ? rt : 8).toFixed(3)),
+      s: hits,
+      d: new Date().toISOString(),
+      mode: 'std', size: state.duration, rev: false
+    };
+    const improved = !prev || run.s > prev.s || (run.s === prev.s && run.t < prev.t);
+    Core.runs.add(GAME, boardKey(), run);
+
+    Core.sfx.fanfare(g);
+    const who = Core.profile
+      ? esc(Core.profile.name) + (Core.profile.id ? `<em style="color:#5d6a88;font-style:normal;font-size:11px">${tagOf(Core.profile.id)}</em>` : '')
+      : '';
+
+    Core.ui.overlay(
+      `<div class="panel-in">
+         <h2>完成 · 色字冲突 ${state.duration} 秒</h2>
+         <div class="scoreRow">
+           <div class="badge g-${g}">${g}</div>
+           <div class="big">${hits}<small>题</small></div>
+         </div>
+         <div class="meta"><span class="nw">评分 <b class="g-${g}">${score}</b> 分</span> · <span class="nw">答错 <b>${miss}</b> 次</span> · <span class="nw">准确率 <b>${acc}%</b></span></div>
+         <div class="meta"><span class="nw">平均反应 <b>${rt ? rt.toFixed(2) : '—'}</b> 秒</span></div>
+         <div class="meta">${improved ? '<span class="rec">★ 个人最好</span>' : '未破个人最好 ' + (prev ? prev.s + ' 题' : '—')}</div>
+         ${who ? `<div class="meta" style="font-size:12px">${who}</div>` : ''}
+         <div class="tiny" id="postMsg" style="min-height:15px"></div>
+         <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+           <button class="btn" id="againBtn">再来一局</button>
+           <button class="btn ghost" id="lbBtn">看排行榜</button>
+         </div>
+         <div class="tiny">S 基准 ${PAR[state.duration]} 题 · 平均 1.5 秒一题</div>
+       </div>`);
+
+    const msg = $('#postMsg');
+    if(!Core.online){
+      msg.textContent = improved ? '本机最好成绩已刷新' : '未破个人最好';
+    }else if(Core.profile && Core.profile.id){
+      pushRun(run);
+    }else{
+      msg.style.color = 'var(--dim)';
+      msg.textContent = '离线档案：连上服务器后可自动上榜';
+    }
+
+    $('#againBtn').addEventListener('click', newRound);
+    $('#lbBtn').addEventListener('click', openLB);
+    refreshBestLine();
+  }
+
+  async function pushRun(rec){
+    if(!Core.online) return;
+    const msg = $('#postMsg');
+    try{
+      const r = await Core.api.post(GAME, { mode:'std', size:state.duration, rev:false }, rec.id, rec.t, rec.s);
+      if(msg){
+        msg.style.color = 'var(--acc2)';
+        msg.innerHTML = r.improved
+          ? `已自动上榜 · 全球第 <b>${r.rank}</b> 名`
+          : '未破个人最好，榜单保持不变';
+      }
+    }catch(e){
+      if(msg){
+        msg.style.color = 'var(--bad)';
+        msg.textContent = e.message === 'invalid score' ? '成绩未通过服务端校验，未上榜' : '上榜失败：' + e.message;
+      }
+    }
+  }
+
+  /* ---------------- 排行榜 ---------------- */
+  function openLB(){
+    Core.lb.open({
+      game: GAME,
+      title: '排行榜',
+      groups: [
+        { key:'dur', value: state.duration, items:[{v:30, label:'30 秒'}, {v:60, label:'60 秒'}] }
+      ],
+      board: v => ({ mode:'std', size: Number(v.dur), rev:false }),
+      subtitle: v => `${v.dur} 秒计时 · 答对越多越好`,
+      best: arr => arr.reduce((a, r) => (r.s > a.s || (r.s === a.s && r.t < a.t) ? r : a)),
+      localRow: (r, best) => `
+        <span class="rk">${best ? '★' : ''}</span>
+        <span class="t">${r.s}<small>题</small></span>
+        <span class="s g-${grade(scoreOf(r.s, r.size))}">${scoreOf(r.s, r.size)}</span>
+        <span class="d">${shortDate(r.d)}</span>`,
+      globalRow: (r, i, me) => `
+        <span class="rk rk${i+1}">${i+1}</span>
+        <span class="nm"><b>${esc(r.name || '匿名')}</b><em>${tagOf(r.id)}</em>${me ? ' <small style="color:var(--acc2);font-weight:600">我</small>' : ''}</span>
+        <span class="t">${r.s}<small>题</small></span>
+        <span class="s g-${grade(scoreOf(r.s, state.duration))}">${scoreOf(r.s, state.duration)}</span>`
+    });
+  }
+
+  /* ---------------- 配置 ---------------- */
+  $('#durSeg').addEventListener('click', function(e){
+    const b = e.target.closest('button');
+    if(!b || b.classList.contains('on')) return;
+    Array.from(this.children).forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    state.duration = parseInt(b.dataset.v, 10);
+    newRound();
+  });
+
+  $('#again').addEventListener('click', newRound);
+
+  window.addEventListener('keydown', function(e){
+    if(Core.gate.isOpen) return;
+    if($('#lb').classList.contains('show')) return;
+    if(e.key >= '1' && e.key <= '4'){
+      e.preventDefault();
+      answer(parseInt(e.key, 10) - 1);
+    }
+    if((e.code === 'Space' || e.code === 'Enter') && !state.running){
+      const b = $('.veil').querySelector('button');
+      if(b) b.click();
+    }
+  });
+
+  /* ---------------- 启动 ---------------- */
+  (async function boot(){
+    buildChoices();
+    Core.mountTopbar({ title:'色字冲突', sub:'STROOP', onLB: openLB });
+    const info = await Core.ready;
+
+    if(info.link.tried && !info.link.ok && info.link.error !== 'offline'){
+      newRound();
+      Core.gate.open(() => newRound());
+      Core.gate.msg(info.link.error === 'not found' ? '链接里的档案号不存在' : ('登录失败：' + info.link.error));
+      return;
+    }
+    newRound();
+    if(!Core.profile) Core.gate.open(() => newRound());
+  })();
+})();
+</script>
+</body>
+</html>

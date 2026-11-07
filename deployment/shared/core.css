@@ -1,0 +1,240 @@
+/* ==========================================================================
+   core.css — 共享层
+   设计变量 / 通用控件 / 弹窗外壳 / 排行榜 / 档案界面
+   新游戏只写自己那一块，不要再复制这里的样式
+   ========================================================================== */
+
+:root{
+  --bg:#070a12; --panel:#0f1421; --line:#222c44; --txt:#e8eefc; --dim:#7f8bab;
+  --acc:#4cc9f0; --acc2:#7cf5c4; --bad:#ff5d7a; --gold:#ffd166;
+  --cell:#141c2e; --cellHover:#1c2740; --stroke:#26314d; --strokeHover:#3a4a72;
+
+  --r-xl:22px; --r-lg:20px; --r-md:13px; --r-sm:10px;
+}
+
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{
+  margin:0;
+  background:radial-gradient(1100px 700px at 50% -15%, #16203a 0%, #070a12 58%) fixed;
+  color:var(--txt);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-tap-highlight-color:transparent;
+}
+
+/* ---------------------------------------------------------------- 按钮 */
+.btn{
+  margin-top:14px;border:0;border-radius:12px;padding:11px 26px;font:inherit;font-size:14px;font-weight:700;
+  color:#06121c;background:linear-gradient(135deg,var(--acc2),var(--acc));cursor:pointer;letter-spacing:.06em;
+  box-shadow:0 8px 26px rgba(76,201,240,.32);transition:transform .12s,box-shadow .15s;
+}
+.btn:active{transform:scale(.97)}
+.btn:hover{box-shadow:0 10px 32px rgba(76,201,240,.48)}
+.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--dim);box-shadow:none}
+.btn.ghost:hover{color:var(--txt);border-color:var(--strokeHover);box-shadow:none}
+.btn.mini{margin-top:0;padding:9px 16px;font-size:13px}
+.hint{margin-top:8px;font-size:11.5px;color:#5d6a88}
+
+/* ---------------------------------------------------------------- 小控件 */
+.iconbtn{
+  border:1px solid var(--line);background:var(--panel);color:var(--dim);border-radius:10px;
+  width:34px;height:32px;font-size:14px;cursor:pointer;transition:.15s;line-height:1;
+}
+.iconbtn:hover{color:var(--txt);border-color:var(--strokeHover)}
+
+.chip{
+  border:1px solid var(--line);background:var(--panel);color:var(--txt);border-radius:10px;
+  padding:6px 11px;font:inherit;font-size:12.5px;font-weight:650;cursor:pointer;max-width:118px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;transition:.15s;
+}
+.chip:hover{border-color:var(--strokeHover)}
+.chip em{color:#5d6a88;font-style:normal;font-weight:500;margin-left:3px;font-size:11px}
+
+.toggle{
+  border:1px solid var(--line);background:var(--panel);color:var(--dim);border-radius:10px;
+  padding:5px 10px;font:inherit;font-size:12px;cursor:pointer;transition:.15s;
+}
+.toggle.on{color:#0b1220;background:var(--acc2);border-color:var(--acc2);font-weight:700}
+
+.seg{display:flex;gap:4px;background:var(--panel);padding:4px;border-radius:14px;border:1px solid var(--line)}
+.seg button{
+  flex:1;border:0;background:transparent;color:var(--dim);font:inherit;font-size:12.5px;
+  padding:7px 4px;border-radius:10px;cursor:pointer;transition:.15s;white-space:nowrap;
+}
+.seg button:hover{color:var(--txt)}
+.seg button.on{background:linear-gradient(180deg,#22304f,#1a2540);color:#fff;box-shadow:0 2px 10px rgba(76,201,240,.18)}
+
+.nameInput{
+  flex:1;max-width:190px;background:#0b1120;border:1px solid var(--line);border-radius:10px;
+  color:var(--txt);font:inherit;font-size:13px;padding:9px 11px;outline:none;text-align:center;
+}
+.nameInput:focus{border-color:var(--acc);box-shadow:0 0 0 2px rgba(76,201,240,.15)}
+.nameInput::placeholder{color:#4c5875}
+
+.linkbtn{
+  background:none;border:0;color:var(--dim);font:inherit;font-size:11.5px;cursor:pointer;
+  text-decoration:underline;text-underline-offset:3px;margin-top:6px;padding:4px;
+}
+.linkbtn:hover{color:var(--txt)}
+
+
+/* ---------------------------------------------------------------- 游戏页外壳 */
+body.play{display:flex;align-items:center;justify-content:center;padding:16px}
+.app{width:min(96vw,660px);display:flex;flex-direction:column;gap:11px}
+
+.topbar{display:flex;align-items:center;gap:9px}
+.back{
+  border:1px solid var(--line);background:var(--panel);color:var(--dim);border-radius:10px;
+  width:32px;height:32px;display:grid;place-items:center;text-decoration:none;transition:.15s;flex:0 0 auto;line-height:1;
+}
+.back:hover{color:var(--txt);border-color:var(--strokeHover)}
+.brand{display:flex;align-items:baseline;gap:8px;flex:1;min-width:0}
+.brand h1{margin:0;font-size:15px;letter-spacing:.18em;font-weight:700;white-space:nowrap}
+.brand span{font-size:11px;color:var(--dim);letter-spacing:.08em}
+.tbtools{display:flex;gap:8px;align-items:center}
+
+.hud{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:7px}
+.stat{
+  background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:7px 10px;
+  display:flex;align-items:baseline;gap:5px;overflow:hidden;
+}
+.stat b{font-size:clamp(16px,4.4vw,22px);font-variant-numeric:tabular-nums;font-weight:750;letter-spacing:-.02em;line-height:1.35}
+.stat small{font-size:10.5px;color:var(--dim);letter-spacing:.04em;white-space:nowrap}
+
+.prog{height:3px;border-radius:3px;background:#141c2e;overflow:hidden}
+.prog i{display:block;height:100%;width:0;border-radius:3px;background:linear-gradient(90deg,var(--acc),var(--acc2));transition:width .25s ease}
+
+.subrow{display:flex;gap:8px;align-items:center;justify-content:space-between;font-size:12px;color:var(--dim)}
+.subrow .acts{display:flex;gap:8px}
+
+/* 舞台：棋盘 / 刺激区，遮罩盖在它上面 */
+.stage{position:relative}
+.veil{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;border-radius:26px;
+  background:rgba(7,10,18,.86);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);
+  opacity:0;pointer-events:none;
+}
+.veil.show{opacity:1;pointer-events:auto}
+.veil[hidden]{display:none}
+
+.cd{
+  font-size:clamp(60px,13vmin,110px);font-weight:820;letter-spacing:-.04em;
+  background:linear-gradient(180deg,#fff,#78c6ff);-webkit-background-clip:text;background-clip:text;color:transparent;
+  animation:pop .32s cubic-bezier(.2,1.5,.4,1);
+}
+
+/* ---------------------------------------------------------------- 排行榜分组 */
+.lb-groups{display:flex;flex-direction:column;gap:8px}
+
+/* ---------------------------------------------------------------- 评级色 */
+.g-S{color:var(--gold)!important}
+.g-A{color:var(--acc2)!important}
+.g-B{color:var(--acc)!important}
+.g-C{color:#9aa8c7!important}
+.g-D{color:var(--bad)!important}
+
+/* ---------------------------------------------------------------- 结算面板 */
+@keyframes pop{from{transform:scale(.72);opacity:0}to{transform:scale(1);opacity:1}}
+
+.panel-in{
+  text-align:center;padding:20px 24px;min-width:min(86%,330px);
+  background:#0f1421;border:1px solid var(--line);border-radius:var(--r-xl);
+  box-shadow:0 24px 70px rgba(0,0,0,.55);animation:pop .28s ease;
+}
+.panel-in h2{margin:0 0 8px;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.2em}
+.big{font-size:clamp(34px,7.6vmin,54px);font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-.03em;line-height:1.1}
+.big small{font-size:.34em;color:var(--dim);margin-left:3px;font-weight:600;letter-spacing:0}
+.big em{font-size:.26em;color:var(--dim);font-style:normal;margin-left:8px;font-weight:600;letter-spacing:.06em}
+.meta{margin-top:9px;font-size:12.5px;color:var(--dim);line-height:1.85;font-variant-numeric:tabular-nums}
+.meta b{color:var(--txt);font-weight:650}
+.rec{color:var(--acc2);font-weight:700;letter-spacing:.05em}
+.nw{white-space:nowrap}
+.tiny{font-size:11px;color:#5d6a88;margin-top:7px;font-variant-numeric:tabular-nums}
+
+.scoreRow{display:flex;align-items:center;justify-content:center;gap:14px}
+.badge{
+  width:56px;height:56px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  font-size:27px;font-weight:850;letter-spacing:-.02em;flex:0 0 auto;
+  border:2px solid currentColor;background:rgba(255,255,255,.03);
+  box-shadow:0 0 26px -6px currentColor;
+}
+
+/* ---------------------------------------------------------------- 弹窗外壳 */
+.lbmodal{
+  position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:18px;
+  background:rgba(4,7,13,.72);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);
+  opacity:0;pointer-events:none;
+}
+.lbmodal.show{opacity:1;pointer-events:auto}
+
+.lb-card{
+  width:min(94vw,440px);max-height:86vh;display:flex;flex-direction:column;gap:11px;
+  background:linear-gradient(180deg,#111827,#0d1320);border:1px solid var(--line);border-radius:var(--r-lg);padding:16px;
+  box-shadow:0 30px 80px rgba(0,0,0,.6);
+}
+
+.lb-head{display:flex;align-items:center;justify-content:space-between}
+.lb-head h2{margin:0;font-size:13px;letter-spacing:.22em;color:var(--dim);font-weight:600}
+
+/* ---------------------------------------------------------------- 排行榜 */
+.lb-tabs{display:grid;grid-template-columns:1.3fr 1fr;gap:8px}
+.lb-sub{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--dim)}
+.lb-scope{margin-bottom:1px}
+.lb-list{overflow:auto;flex:1;min-height:96px;max-height:46vh;display:flex;flex-direction:column;gap:6px;padding-right:2px}
+
+.lb-row{
+  display:grid;grid-template-columns:30px 1fr 58px 76px;align-items:center;gap:8px;
+  padding:9px 11px;border-radius:12px;background:#0f1421;border:1px solid #1b2337;font-variant-numeric:tabular-nums;
+}
+.lb-row.me{border-color:var(--acc2);background:#10231f}
+.lb-row .t{font-size:17px;font-weight:750}
+.lb-row .t small{font-size:11px;color:var(--dim);margin-left:2px;font-weight:500}
+.lb-row .s{text-align:right;font-weight:750;font-size:14px}
+.lb-row .d{text-align:right;font-size:11px;color:#5d6a88}
+.lb-row .nm em{color:#5d6a88;font-style:normal;font-weight:500;font-size:11px;margin-left:3px}
+
+.lb-row.g{grid-template-columns:26px 1fr 62px 44px}
+.lb-row.g .nm{font-size:13px;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.rk{font-weight:800;font-size:13px;color:var(--dim);text-align:center}
+.rk.rk1{color:#ffd166}
+.rk.rk2{color:#cfd8e8}
+.rk.rk3{color:#d08b5b}
+
+.lb-empty{padding:34px 10px;text-align:center;color:var(--dim);font-size:12.5px;line-height:1.9}
+.lb-foot{display:flex;align-items:center;justify-content:space-between;font-size:11px;color:#5d6a88;gap:8px}
+
+/* ---------------------------------------------------------------- 建档 */
+.gate-card{padding:26px 24px;text-align:center}
+.gate-logo{font-size:16px;letter-spacing:.2em;font-weight:750;margin-bottom:6px}
+.gate-sub{font-size:12.5px;color:var(--dim);margin:0 0 18px}
+#gate .gate-input{display:block;width:100%;max-width:none;flex:none;margin:0 0 10px;padding:12px;font-size:15px}
+.gate-btn{width:100%;margin-top:2px}
+.gate-msg{min-height:16px;font-size:11.5px;color:var(--bad);margin-top:8px}
+
+/* ---------------------------------------------------------------- 我的档案 */
+.me-top{display:flex;align-items:baseline;gap:6px;justify-content:center;margin:4px 0 12px}
+.me-name{font-size:20px;font-weight:750}
+.me-tag{color:#5d6a88;font-size:12px}
+.me-row{display:flex;align-items:center;gap:8px;justify-content:center;margin-bottom:8px}
+.me-lbl{font-size:11.5px;color:var(--dim)}
+.me-row code{font-size:16px;letter-spacing:.14em;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--acc2)}
+.me-note{font-size:11.5px;color:#5d6a88;line-height:1.7;margin:6px 0 6px;text-align:left}
+.me-warn{
+  font-size:11.5px;color:var(--gold);background:rgba(255,209,102,.08);border:1px solid rgba(255,209,102,.22);
+  border-radius:8px;padding:7px 9px;margin:10px 0 6px;text-align:center;
+}
+.me-help{font-size:11px;color:#5d6a88;text-align:center;margin:0 0 8px}
+.me-link{
+  font-size:11px;color:var(--dim);word-break:break-all;background:#0b1120;border:1px solid var(--line);
+  border-radius:8px;padding:7px 9px;font-family:ui-monospace,Menlo,Consolas,monospace;text-align:left;
+}
+.me-actions{display:flex;gap:7px;justify-content:center;flex-wrap:wrap;margin-top:12px}
+.me-rename{display:flex;gap:7px;margin-top:10px}
+.me-rename .nameInput{max-width:none}
+.signrow{display:flex;gap:8px;justify-content:center;margin-top:12px}
+
+.copy-mail{background:none;border:0;padding:0;font:inherit;color:var(--acc);cursor:pointer;text-underline-offset:3px}
+.copy-mail:hover{text-decoration:underline}
+.copy-mail.copied{color:var(--acc2);text-decoration:none}
